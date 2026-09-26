@@ -18,7 +18,7 @@
 ## 2. إنشاء التطبيق
 
 1. داخل نفس بيئة `production` اختر **Create Service** ثم **Application**، وسمّه `gdg-live-event`.
-2. في **General / Source** اختر GitHub ثم المستودع والفرع المطلوبين. إذا لم يكن GitHub مربوطًا، اربطه من **Git Providers** وثبّت Dokploy GitHub App على هذا المستودع.
+2. في **General / Source** اختر GitHub ثم المستودع والفرع المطلوبين، واجعل **Build Path** هو `.` إذا كان هذا المشروع في جذر المستودع. إذا لم يكن GitHub مربوطًا، اربطه من **Git Providers** وثبّت Dokploy GitHub App على هذا المستودع.
 3. اجعل **Build Type** هو `Dockerfile`، ثم استخدم:
    - **Dockerfile Path:** `Dockerfile`
    - **Docker Context Path:** `.`
