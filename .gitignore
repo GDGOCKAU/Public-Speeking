@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.test-pg/
+.local/
+.env
+.env.*
+!.env.example
+!dokploy.env.example
+dokploy.env
+.DS_Store

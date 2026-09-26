@@ -1,0 +1,57 @@
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import { createServer } from 'node:http';
+import { Server } from 'socket.io';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { initDb } from './db/index.js';
+import { AppError } from './services/logic.js';
+import { login,logout,requireAdmin,session } from './auth.js';
+import * as event from './services/event.js';
+
+if(!process.env.DATABASE_URL||!process.env.ADMIN_PASSWORD||!process.env.SESSION_SECRET){
+  throw new Error('Missing server configuration. Run "npm run dev" for automatic local setup, or copy .env.example to .env and set DATABASE_URL, ADMIN_PASSWORD, and SESSION_SECRET.');
+}
+const app=express();const server=createServer(app);const origin=process.env.PUBLIC_ORIGIN||'http://localhost:5173';
+const io=new Server(server,{cors:{origin,credentials:true}});
+app.disable('x-powered-by');app.use(cors({origin,credentials:true}));app.use(express.json({limit:'24kb'}));app.use(cookieParser(process.env.SESSION_SECRET));
+const limits=new Map();function rateLimit(max,windowMs){return(req,res,next)=>{const key=req.ip+':'+req.path;const now=Date.now();let item=limits.get(key);if(!item||item.until<now)item={count:0,until:now+windowMs};item.count++;limits.set(key,item);if(item.count>max)return next(new AppError(429,'Too many attempts. Try again shortly.'));next();};}
+setInterval(()=>{const now=Date.now();for(const [key,item] of limits)if(item.until<now)limits.delete(key);},60000).unref();
+const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res)).catch(next);
+const ok=fn=>wrap(async(req,res)=>{await fn(req,res);res.json({ok:true});});
+app.get('/api/health',(_req,res)=>res.json({ok:true}));
+app.get('/api/state',wrap(async(req,res)=>res.json(await event.publicState(req.query.attendeeId,origin,false,req.query.screenTeamId))));
+app.post('/api/attendees',rateLimit(12,60000),wrap(async(req,res)=>res.status(201).json(await event.register(req.body))));
+app.get('/api/attendees/:id',wrap(async(req,res)=>res.json(await event.getAttendee(req.params.id))));
+app.patch('/api/attendees/:id/theme',ok(async req=>{await event.setTheme(req.params.id,req.body.darkMode);}));
+app.post('/api/speaker/confirm',rateLimit(20,60000),ok(async req=>{await event.confirmSpeaker(req.body.token,req.body.attendeeId,io);}));
+app.post('/api/speaker/votes',rateLimit(30,60000),ok(async req=>{await event.speakerVote(req.body,io);}));
+app.post('/api/scenario/answers',rateLimit(20,60000),ok(async req=>{await event.submitAnswer(req.body,io);}));
+app.post('/api/scenario/votes',rateLimit(30,60000),ok(async req=>{await event.scenarioVote(req.body,io);}));
+app.post('/api/admin/login',rateLimit(8,15*60000),wrap(login));
+app.get('/api/admin/session',wrap(async(req,res)=>res.json({authenticated:await session(req),darkMode:await event.getAdminTheme()})));
+app.use('/api/admin',requireAdmin);
+app.post('/api/admin/logout',wrap(logout));
+app.get('/api/admin/snapshot',wrap(async(req,res)=>res.json(await event.adminSnapshot(origin,new Set(connectedAttendees.values()).size))));
+app.patch('/api/admin/settings',ok(async req=>{await event.settings(req.body,io);}));
+app.patch('/api/admin/theme',ok(async req=>{await event.adminTheme(req.body.darkMode);}));
+app.patch('/api/admin/screen/theme',ok(async req=>{await event.screenTheme(req.body.darkMode,io);}));
+app.post('/api/admin/screen',ok(async req=>{await event.screen(req.body.view,io);}));
+app.post('/api/admin/finish',ok(async req=>{await event.finishActivity(req.body||{},io);}));
+app.post('/api/admin/speaker-prompts',wrap(async(req,res)=>res.status(201).json(await event.addSpeakerPrompts(req.body,io))));
+app.delete('/api/admin/speaker-prompts/:id',ok(async req=>{await event.deleteSpeakerPrompt(req.params.id,io);}));
+app.post('/api/admin/speaker/select',ok(async req=>{await event.selectSpeaker(req.body,io);}));
+app.post('/api/admin/speaker/:action',ok(async req=>{await event.speakerTransition(req.params.action,req.body||{},io);}));
+app.post('/api/admin/scenarios',wrap(async(req,res)=>res.json(await event.saveScenario(req.body,io))));
+app.patch('/api/admin/scenarios/:id',wrap(async(req,res)=>res.json(await event.saveScenario({...req.body,id:req.params.id},io))));
+app.delete('/api/admin/scenarios/:id',ok(async req=>{await event.deleteScenario(req.params.id,io);}));
+app.post('/api/admin/scenario/start',ok(async req=>{await event.startScenario(req.body,io);}));
+app.post('/api/admin/scenario/:action',ok(async req=>{await event.scenarioTransition(req.params.action,io);}));
+const connectedAttendees=new Map();
+io.use(async(socket,next)=>{try{const cookies=Object.fromEntries((socket.handshake.headers.cookie||'').split(';').filter(Boolean).map(x=>{const index=x.indexOf('=');return[x.slice(0,index).trim(),decodeURIComponent(x.slice(index+1))]}));const req={signedCookies:{gdg_admin:cookieParser.signedCookie(cookies.gdg_admin,process.env.SESSION_SECRET)}};if(socket.handshake.auth?.role==='admin'&&!await session(req))return next(new Error('Unauthorized'));const attendeeId=socket.handshake.auth?.attendeeId;if(attendeeId){const a=await event.getAttendee(attendeeId);socket.data.attendeeId=a.id;}socket.data.role=socket.handshake.auth?.role||'public';next();}catch(e){next(e);}});
+io.on('connection',socket=>{if(socket.data.attendeeId){connectedAttendees.set(socket.id,socket.data.attendeeId);io.emit('event:changed');}socket.emit('event:changed');socket.on('disconnect',()=>{if(connectedAttendees.delete(socket.id))io.emit('event:changed')});});
+const dist=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../dist');if(process.env.NODE_ENV==='production'){app.use(express.static(dist));app.get('*',(_req,res)=>res.sendFile(path.join(dist,'index.html')));}
+app.use((err,_req,res,_next)=>{if(err.code==='22P02')err=new AppError(400,'Invalid identifier.');if(err.code==='23505')err=new AppError(409,'This action was already completed.');const status=err.status||500;if(status===500)console.error(err);res.status(status).json({message:status===500?'Server error. Please try again.':err.message});});
+await initDb();server.listen(Number(process.env.PORT)||5001,()=>console.log(`GDG event server on ${process.env.PORT||5001}`));

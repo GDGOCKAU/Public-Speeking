@@ -1,0 +1,169 @@
+/* ── GDG KAU identity — global stylesheet ──────────────────────────────────
+ *
+ * Tailwind v3 setup is shown below. For Tailwind v4, replace the three
+ * @tailwind directives with a single `@import "tailwindcss";` at the END of
+ * this file, and keep everything else as-is.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Roboto:wght@300;400;500;700&display=swap');
+
+@import "tailwindcss";
+
+.gdg-input{border-width:1.5px;outline:none;transition:border-color .15s,border-width .15s}
+.gdg-input:focus{border:2px solid #3A7CF5;outline:none}
+button{cursor:pointer}
+button:disabled{cursor:not-allowed}
+.gdg-button[data-variant="primary"]:hover:not(:disabled){background:#2563EB!important;box-shadow:0 4px 12px rgba(58,124,245,.4),0 2px 4px rgba(58,124,245,.2)!important}
+.gdg-button[data-variant="secondary"]:hover:not(:disabled){background:#E8F0FE!important}
+.dark .gdg-button[data-variant="secondary"]:hover:not(:disabled){background:#1A2E4B!important}
+.gdg-button[data-variant="danger"]:hover:not(:disabled){background:#C62828!important}
+.gdg-button[data-variant="quiet"]:hover:not(:disabled){filter:brightness(.97)}
+*{box-sizing:border-box}
+::selection{background:rgba(58,124,245,.22)}
+input[type="range"]{cursor:pointer}
+@keyframes scoreReveal{0%{opacity:0;transform:translateY(22px) scale(.88)}100%{opacity:1;transform:translateY(0) scale(1)}}
+.score-reveal{animation:scoreReveal .5s ease-out both}
+@keyframes voteShimmer{0%{background-position:0% 50%}100%{background-position:200% 50%}}
+.screen-vote-shimmer{background:linear-gradient(90deg,#4285F4,#EA4335,#FBBC04,#34A853,#4285F4);background-size:200% 100%;animation:voteShimmer 3s linear infinite}
+.speaker-rating{height:12px;border-radius:999px;appearance:none;-webkit-appearance:none;outline:none;background:linear-gradient(90deg,#3A7CF5 0 var(--rating),var(--track) var(--rating) 100%)}
+.speaker-rating::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;width:30px;height:30px;border-radius:50%;background:#fff;border:4px solid #3A7CF5;box-shadow:0 3px 12px rgba(58,124,245,.35);cursor:pointer}
+.speaker-rating::-moz-range-thumb{width:22px;height:22px;border-radius:50%;background:#fff;border:4px solid #3A7CF5;box-shadow:0 3px 12px rgba(58,124,245,.35);cursor:pointer}
+.speaker-rating:focus::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(58,124,245,.18),0 3px 12px rgba(58,124,245,.35)}
+.admin-scroll{scrollbar-width:thin;scrollbar-color:var(--border) transparent;scrollbar-gutter:stable}
+.admin-scroll::-webkit-scrollbar{width:8px;height:8px}
+.admin-scroll::-webkit-scrollbar-track{background:transparent}
+.admin-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:100px;border:2px solid transparent;background-clip:padding-box}
+
+/* ── Design tokens ─────────────────────────────────────────────────────── */
+
+:root {
+  --font-size: 16px;
+  --font-display: 'DM Sans', sans-serif;
+  --font-body: 'Roboto', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+
+  /* Google brand four */
+  --google-blue: #4285F4;
+  --google-red: #EA4335;
+  --google-yellow: #FBBC04;
+  --google-green: #34A853;
+
+  /* Interactive blue — the only clickable color */
+  --primary: #3A7CF5;
+  --primary-hover: #2563EB;
+  --primary-tint: #E8F0FE;
+  --primary-on-tint: #1967D2;
+
+  /* Light surfaces */
+  --background: #F8F9FA;
+  --surface: #FFFFFF;
+  --surface-alt: #F1F3F4;
+  --row-hover: #FAFAFA;
+  --border: #E0E0E0;
+  --border-subtle: #F1F3F4;
+
+  /* Light text */
+  --text-primary: #1C1B1F;
+  --text-secondary: #3C4043;
+  --text-muted: #5F6368;
+  --text-faint: #9AA0A6;
+
+  --radius: 0.625rem;
+}
+
+.dark {
+  --background: #121212;
+  --surface: #1E1E1E;
+  --surface-alt: #2A2A2A;
+  --row-hover: #2A2A2A;
+  --border: #333333;
+  --border-subtle: #3C3C3C;
+
+  --primary-tint: #1A2E4B;
+
+  --text-primary: #E0E0E0;
+  --text-secondary: #CCCCCC;
+  --text-muted: #AAAAAA;
+  --text-faint: #888888;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────── */
+
+html {
+  font-size: var(--font-size);
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-body);
+  background-color: var(--background);
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+#root {
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+}
+
+/* Defaults belong in the base layer so page utilities can control projector type. */
+@layer base {
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    line-height: 1.25;
+    margin: 0;
+  }
+  h1 { font-size: 26px; letter-spacing: -0.4px; }
+  h2 { font-size: 22px; letter-spacing: -0.3px; }
+  h3 { font-size: 18px; letter-spacing: -0.2px; }
+  h4 { font-size: 16px; }
+  label, button { font-weight: var(--font-weight-medium); line-height: 1.5; }
+  button { font-family: var(--font-display); }
+  input, textarea { font-family: var(--font-body); font-weight: var(--font-weight-normal); line-height: 1.5; }
+  code, pre { font-family: var(--font-mono); }
+}
+
+/* ── Keyframes ─────────────────────────────────────────────────────────── */
+
+/* Full-page four-dot loader. */
+@keyframes dotBounce {
+  0%, 100% { transform: translateY(0);     animation-timing-function: cubic-bezier(0.33, 0, 0.66, 1); }
+  45%      { transform: translateY(-28px); animation-timing-function: cubic-bezier(0.33, 0, 0.66, 1); }
+}
+
+/* Inline four-dot loader, for regions inside a card or table. */
+@keyframes loadingDotsBounce {
+  0%, 100% { transform: translateY(0); }
+  45%      { transform: translateY(-8px); }
+}
+
+/* Green halo on a "live" indicator dot. */
+@keyframes livePulse {
+  0%   { box-shadow: 0 0 0 0 rgba(52, 168, 83, 0.5); }
+  70%  { box-shadow: 0 0 0 6px rgba(52, 168, 83, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(52, 168, 83, 0); }
+}
+
+/* Rejects an invalid modal submit without painting the form red. */
+@keyframes modalShake {
+  0%, 100% { transform: translateX(0); }
+  20%      { transform: translateX(-6px); }
+  60%      { transform: translateX(6px); }
+}
+
+/* Text caret in the code editor. */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+
+.animate-live-pulse {
+  animation: livePulse 1.6s ease-out infinite;
+}
