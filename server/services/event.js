@@ -77,6 +77,80 @@ export async function adminSnapshot(origin, connectedCount = 0) {
   state.defaultParticipants = (await one(pool, 'SELECT default_participants FROM event_state WHERE id=1')).default_participants; return state;
 }
 
+export async function exportEventData() {
+  const [event, teams, attendees, speakerPrompts, scenarios, speakerScores, scenarioPoints] = await Promise.all([
+    one(pool, 'SELECT event_name,default_participants FROM event_state WHERE id=1'),
+    all(pool, 'SELECT id,name,color FROM teams ORDER BY id'),
+    all(pool, 'SELECT a.name,a.team_id,t.name AS team_name FROM attendees a JOIN teams t ON t.id=a.team_id ORDER BY a.name'),
+    all(pool, 'SELECT prompt_text FROM speaker_prompts ORDER BY created_at,prompt_text'),
+    all(pool, 'SELECT title,scenario_text FROM scenarios ORDER BY created_at,title'),
+    all(pool, "SELECT a.name,ss.team_id,t.name AS team_name,ss.displayed_score::float AS score FROM speaker_sessions ss JOIN attendees a ON a.id=ss.speaker_id JOIN teams t ON t.id=ss.team_id WHERE ss.status='REVEALED' ORDER BY ss.team_id,ss.displayed_score DESC,ss.created_at"),
+    all(pool, "SELECT a.name,a.team_id,t.name AS team_name,coalesce(count(v.answer_id),0)::int AS points FROM attendees a JOIN teams t ON t.id=a.team_id LEFT JOIN scenario_answers an ON an.attendee_id=a.id LEFT JOIN scenario_rounds r ON r.id=an.round_id AND r.status='REVEALED' LEFT JOIN scenario_votes v ON v.answer_id=an.id AND r.id IS NOT NULL GROUP BY a.id,t.id ORDER BY points DESC,a.name")
+  ]);
+  return {
+    format: 'gdg-live-event-export', version: 1, exportedAt: new Date().toISOString(),
+    event: { name: event.event_name, defaultParticipants: event.default_participants, teams: teams.map(team => ({ id: team.id, name: team.name, color: team.color })) },
+    attendees: attendees.map(person => ({ name: person.name, teamId: person.team_id, teamName: person.team_name })),
+    speakerPrompts: speakerPrompts.map(row => row.prompt_text),
+    scenarios: scenarios.map(row => ({ title: row.title, text: row.scenario_text })),
+    leaderboards: { speakerScores, scenarioPoints }
+  };
+}
+
+function importArray(value, maximum, label) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > maximum) fail(400, `${label} must contain at most ${maximum} items.`);
+  return value;
+}
+
+function importPayload(value) {
+  const backup = value?.backup;
+  if (!backup || typeof backup !== 'object' || Array.isArray(backup) || backup.format !== 'gdg-live-event-export' || backup.version !== 1) fail(400, 'Choose a valid GDG Live Event export file.');
+  const event = backup.event;
+  if (!event || typeof event !== 'object' || Array.isArray(event)) fail(400, 'The export file is missing event settings.');
+  const teams = importArray(event.teams, 2, 'Teams');
+  if (teams.length !== 2) fail(400, 'The export file must contain both teams.');
+  if (new Set(teams.map(team => Number(team?.id))).size !== 2 || !teams.every(team => [1, 2].includes(Number(team?.id)))) fail(400, 'The export file contains invalid teams.');
+  return { event, teams, attendees: importArray(backup.attendees, 5000, 'Attendees'), prompts: importArray(backup.speakerPrompts, 1000, 'Speaker prompts'), scenarios: importArray(backup.scenarios, 1000, 'Scenarios') };
+}
+
+export async function importEventData(value, io) {
+  const { event, teams, attendees, prompts, scenarios } = importPayload(value);
+  const result = await tx(async db => {
+    const state = await locked(db);
+    const activeSpeakers = (await one(db, 'SELECT count(*)::int AS count FROM team_speaker_state WHERE speaker_session_id IS NOT NULL')).count;
+    if (state.activity !== 'NONE' || activeSpeakers) fail(409, 'Finish or cancel the active round before importing data.');
+    const eventName = validText(event.name, 100, 'Event name'), count = Number(event.defaultParticipants);
+    if (!Number.isInteger(count) || count < 2 || count > 30) fail(400, 'Participant count must be 2–30.');
+    await db.query('UPDATE event_state SET event_name=$1,default_participants=$2,updated_at=now() WHERE id=1', [eventName, count]);
+    for (const team of teams) {
+      const id = needTeamId(team?.id), name = validText(team?.name, 40, 'Team name'), color = team?.color;
+      if (!/^#[0-9a-f]{6}$/i.test(color)) fail(400, 'Invalid team color.');
+      await db.query('UPDATE teams SET name=$2,color=$3 WHERE id=$1', [id, name, color]);
+    }
+    let attendeesAdded = 0, promptsAdded = 0, scenariosAdded = 0;
+    for (const item of attendees) {
+      const name = normalizeName(item?.name), teamId = needTeamId(item?.teamId);
+      if (name.length < 2 || name.length > 80) fail(400, 'Each attendee name must be 2–80 characters.');
+      const inserted = await db.query('INSERT INTO attendees(id,name,name_key,team_id) VALUES($1,$2,$3,$4) ON CONFLICT(name_key) DO NOTHING', [randomUUID(), name, name.toLocaleLowerCase(), teamId]);
+      attendeesAdded += inserted.rowCount;
+    }
+    for (const item of prompts) {
+      const prompt = validText(item, 500, 'Prompt');
+      const inserted = await db.query('INSERT INTO speaker_prompts(prompt_text) VALUES($1) ON CONFLICT DO NOTHING', [prompt]);
+      promptsAdded += inserted.rowCount;
+    }
+    for (const item of scenarios) {
+      const title = validText(item?.title, 100, 'Scenario title'), text = validText(item?.text, 2000, 'Scenario');
+      const inserted = await db.query("INSERT INTO scenarios(title,scenario_text,status) SELECT $1,$2,'DRAFT' WHERE NOT EXISTS (SELECT 1 FROM scenarios WHERE lower(title)=lower($1) AND scenario_text=$2)", [title, text]);
+      scenariosAdded += inserted.rowCount;
+    }
+    return { attendeesAdded, promptsAdded, scenariosAdded };
+  });
+  changed(io, 'data:imported');
+  return result;
+}
+
 export async function settings(input, io) { await tx(async db => { await locked(db); const eventName = validText(input.eventName, 100, 'Event name'), count = Number(input.defaultParticipants); if (!Number.isInteger(count) || count < 2 || count > 30) fail(400, 'Participant count must be 2–30.'); await db.query('UPDATE event_state SET event_name=$1,default_participants=$2,updated_at=now() WHERE id=1', [eventName, count]); for (const team of input.teams || []) { if (![1, 2].includes(Number(team.id)) || !/^#[0-9a-f]{6}$/i.test(team.color)) fail(400, 'Invalid team.'); await db.query('UPDATE teams SET name=$2,color=$3 WHERE id=$1', [Number(team.id), validText(team.name, 40, 'Team name'), team.color]); } }); changed(io); }
 export async function adminTheme(darkMode) { if (typeof darkMode !== 'boolean') fail(400, 'Invalid theme.'); await pool.query('UPDATE event_state SET admin_dark_mode=$1 WHERE id=1', [darkMode]); }
 export async function getAdminTheme() { return (await one(pool, 'SELECT admin_dark_mode FROM event_state WHERE id=1')).admin_dark_mode; }

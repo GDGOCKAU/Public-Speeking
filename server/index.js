@@ -16,7 +16,7 @@ if(!process.env.DATABASE_URL||!process.env.ADMIN_PASSWORD||!process.env.SESSION_
 }
 const app=express();const server=createServer(app);const origin=process.env.PUBLIC_ORIGIN||'http://localhost:5173';
 const io=new Server(server,{cors:{origin,credentials:true}});
-app.disable('x-powered-by');app.use(cors({origin,credentials:true}));app.use(express.json({limit:'24kb'}));app.use(cookieParser(process.env.SESSION_SECRET));
+app.disable('x-powered-by');app.use(cors({origin,credentials:true}));app.use(express.json({limit:'1mb'}));app.use(cookieParser(process.env.SESSION_SECRET));
 const limits=new Map();function rateLimit(max,windowMs){return(req,res,next)=>{const key=req.ip+':'+req.path;const now=Date.now();let item=limits.get(key);if(!item||item.until<now)item={count:0,until:now+windowMs};item.count++;limits.set(key,item);if(item.count>max)return next(new AppError(429,'Too many attempts. Try again shortly.'));next();};}
 setInterval(()=>{const now=Date.now();for(const [key,item] of limits)if(item.until<now)limits.delete(key);},60000).unref();
 const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res)).catch(next);
@@ -35,6 +35,8 @@ app.get('/api/admin/session',wrap(async(req,res)=>res.json({authenticated:await 
 app.use('/api/admin',requireAdmin);
 app.post('/api/admin/logout',wrap(logout));
 app.get('/api/admin/snapshot',wrap(async(req,res)=>res.json(await event.adminSnapshot(origin,new Set(connectedAttendees.values()).size))));
+app.get('/api/admin/export',wrap(async(_req,res)=>res.json(await event.exportEventData())));
+app.post('/api/admin/import',wrap(async(req,res)=>res.json(await event.importEventData(req.body,io))));
 app.patch('/api/admin/settings',ok(async req=>{await event.settings(req.body,io);}));
 app.patch('/api/admin/theme',ok(async req=>{await event.adminTheme(req.body.darkMode);}));
 app.patch('/api/admin/screen/theme',ok(async req=>{await event.screenTheme(req.body.darkMode,io);}));
