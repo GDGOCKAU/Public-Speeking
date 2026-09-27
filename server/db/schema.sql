@@ -2,6 +2,8 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE IF NOT EXISTS teams (id smallint PRIMARY KEY CHECK (id IN (1,2)), name text NOT NULL, color text NOT NULL CHECK (color ~ '^#[0-9A-Fa-f]{6}$'));
 INSERT INTO teams(id,name,color) VALUES (1,'Team 1','#4285F4'),(2,'Team 2','#EA4335') ON CONFLICT (id) DO NOTHING;
 CREATE TABLE IF NOT EXISTS attendees (id uuid PRIMARY KEY, name text NOT NULL, name_key text NOT NULL UNIQUE, team_id smallint NOT NULL REFERENCES teams(id), dark_mode boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE attendees ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
+CREATE INDEX IF NOT EXISTS active_attendees_by_team ON attendees(team_id,name) WHERE active=true;
 CREATE TABLE IF NOT EXISTS speaker_prompts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), prompt_text text NOT NULL UNIQUE CHECK(length(prompt_text) BETWEEN 1 AND 500), used boolean NOT NULL DEFAULT false, used_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS unique_speaker_prompt_text ON speaker_prompts(lower(prompt_text));
 CREATE TABLE IF NOT EXISTS speaker_sessions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), speaker_id uuid NOT NULL REFERENCES attendees(id), team_id smallint NOT NULL REFERENCES teams(id), prompt_id uuid REFERENCES speaker_prompts(id), status text NOT NULL CHECK(status IN ('SELECTED','CONFIRMED','OPEN','CLOSED','REVEALED','CANCELLED')), qr_token uuid NOT NULL DEFAULT gen_random_uuid(), qr_expires_at timestamptz NOT NULL DEFAULT(now()+interval '10 minutes'), displayed_score numeric(5,2), created_at timestamptz NOT NULL DEFAULT now());

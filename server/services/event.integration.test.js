@@ -28,6 +28,7 @@ test('PostgreSQL registration, isolated speaker rounds and scenario integrity', 
 
     await event.selectSpeaker({ teamId: 1, attendeeId: alice.id }, io);
     await event.selectSpeaker({ teamId: 2, attendeeId: cara.id }, io);
+    await assert.rejects(event.deactivateAttendee(alice.id, io), /active speaker/);
     let state = await event.publicState(alice.id, 'http://localhost:5173');
     assert.equal(state.speaker.qrUrl, undefined);
     const firstPrompt = state.speaker.prompt;
@@ -67,9 +68,15 @@ test('PostgreSQL registration, isolated speaker rounds and scenario integrity', 
     state = await event.publicState(bob.id, 'http://localhost:5173');
     assert.equal(state.speaker.name, 'Bob Two');
     assert.notEqual(state.speaker.prompt, firstPrompt);
+    const secondPrompt = (await event.adminSnapshot('http://localhost:5173')).speakerPrompts.find(prompt => prompt.prompt_text !== firstPrompt);
     await event.speakerTransition('cancel', { teamId: 1 }, io);
+    await event.selectSpeaker({ teamId: 2, attendeeId: dan.id, promptId: secondPrompt.id }, io);
+    state = await event.publicState(dan.id, 'http://localhost:5173');
+    assert.equal(state.speaker.name, 'Dan Four');
+    assert.equal(state.speaker.prompt, secondPrompt.prompt_text);
+    await event.speakerTransition('cancel', { teamId: 2 }, io);
     adminState = await event.adminSnapshot('http://localhost:5173');
-    assert.equal(adminState.speakerPrompts.reduce((total, prompt) => total + prompt.used_team_ids.length, 0), 3);
+    assert.equal(adminState.speakerPrompts.reduce((total, prompt) => total + prompt.used_team_ids.length, 0), 4);
     assert.ok(adminState.speakerPrompts.every(prompt => prompt.used_team_ids.includes(1)));
     await assert.rejects(event.selectSpeaker({ teamId: 1 }, io), /used every prompt/);
 
@@ -100,6 +107,27 @@ test('PostgreSQL registration, isolated speaker rounds and scenario integrity', 
     assert.ok(state.scenario.answers.every(answer => answer.author));
     assert.equal(state.scenarioLeaderboard.reduce((sum, row) => sum + row.points, 0), 2);
     await event.finishActivity({}, io);
+
+    const contentPack = await event.exportContentData();
+    assert.deepEqual(Object.keys(contentPack).sort(), ['exportedAt', 'format', 'scenarios', 'speakerPrompts', 'version']);
+    assert.equal(contentPack.format, 'gdg-live-event-content');
+    assert.equal(contentPack.speakerPrompts.length, 2);
+    assert.deepEqual(contentPack.scenarios, [{ title: 'The Challenge', text: 'What would you do?' }]);
+    assert.deepEqual(await event.importContentData({ pack: contentPack }, io), { promptsAdded: 0, scenariosAdded: 0 });
+    const expandedContentPack = { ...contentPack, speakerPrompts: [...contentPack.speakerPrompts, 'Describe a bold idea in sixty seconds.'], scenarios: [...contentPack.scenarios, { title: 'Community Challenge', text: 'How would you bring people together?' }] };
+    assert.deepEqual(await event.importContentData({ pack: expandedContentPack }, io), { promptsAdded: 1, scenariosAdded: 1 });
+    await assert.rejects(event.importContentData({ pack: await event.exportEventData() }, io), /valid prompts and scenarios export/);
+    adminState = await event.adminSnapshot('http://localhost:5173');
+    assert.equal(adminState.speakerPrompts.length, 3);
+    assert.equal(adminState.scenarios.length, 2);
+
+    await event.deactivateAttendee(alice.id, io);
+    await assert.rejects(event.getAttendee(alice.id), /not found/);
+    assert.equal((await event.publicState(alice.id, 'http://localhost:5173')).viewer, null);
+    adminState = await event.adminSnapshot('http://localhost:5173');
+    assert.equal(adminState.attendees.some(person => person.id === alice.id), false);
+    const replacementAlice = await event.register({ name: 'Alice One', teamId: 2 });
+    assert.notEqual(replacementAlice.id, alice.id);
 
     const req = { body: { password: 'wrong' } };
     await assert.rejects(login(req, { cookie() {}, json() {} }), /Incorrect password/);

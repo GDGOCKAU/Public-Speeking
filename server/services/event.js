@@ -7,7 +7,7 @@ const all = async (db, sql, args = []) => (await db.query(sql, args)).rows;
 async function locked(db) { return one(db, 'SELECT * FROM event_state WHERE id=1 FOR UPDATE'); }
 function needId(id) { if (!uuid(id)) fail(400, 'Invalid identifier.'); return id; }
 function needTeamId(teamId) { const id = Number(teamId); if (![1, 2].includes(id)) fail(400, 'Choose a team.'); return id; }
-async function attendee(db, id) { const row = await one(db, 'SELECT a.*,t.name AS team_name,t.color AS team_color FROM attendees a JOIN teams t ON t.id=a.team_id WHERE a.id=$1', [needId(id)]); if (!row) fail(404, 'Attendee not found.'); return row; }
+async function attendee(db, id) { const row = await one(db, 'SELECT a.*,t.name AS team_name,t.color AS team_color FROM attendees a JOIN teams t ON t.id=a.team_id WHERE a.id=$1 AND a.active=true', [needId(id)]); if (!row) fail(404, 'Attendee not found.'); return row; }
 async function teamSpeakerState(db, teamId, lock = false) { const id = needTeamId(teamId); const row = await one(db, `SELECT * FROM team_speaker_state WHERE team_id=$1${lock ? ' FOR UPDATE' : ''}`, [id]); if (!row) fail(409, 'Speaker screen is not initialized for this team.'); return row; }
 async function currentSpeaker(db, state) { if (!state?.speaker_session_id) fail(409, 'No current speaker for this team.'); return one(db, 'SELECT ss.*,a.name AS speaker_name,t.name AS team_name,t.color AS team_color,p.prompt_text FROM speaker_sessions ss JOIN attendees a ON a.id=ss.speaker_id JOIN teams t ON t.id=ss.team_id LEFT JOIN speaker_prompts p ON p.id=ss.prompt_id WHERE ss.id=$1', [state.speaker_session_id]); }
 async function currentRound(db, state) { if (!state.scenario_round_id) fail(409, 'No current scenario round.'); return one(db, 'SELECT r.*,sc.title,sc.scenario_text FROM scenario_rounds r JOIN scenarios sc ON sc.id=r.scenario_id WHERE r.id=$1', [state.scenario_round_id]); }
@@ -49,11 +49,22 @@ async function speakerData(db, state, viewer, origin, includePrivate) {
 export async function register({ name, teamId }) { const value = normalizeName(name); if (value.length < 2 || value.length > 80) fail(400, 'Enter a name between 2 and 80 characters.'); if (![1, 2].includes(Number(teamId))) fail(400, 'Choose a team.'); const id = randomUUID(); try { return await one(pool, 'INSERT INTO attendees(id,name,name_key,team_id) VALUES($1,$2,$3,$4) RETURNING id,name,team_id,dark_mode', [id, value, value.toLocaleLowerCase(), Number(teamId)]); } catch (error) { if (error.code === '23505') fail(409, 'This name is already registered. Please enter your full two-part name.'); throw error; } }
 export async function getAttendee(id) { return attendee(pool, id); }
 export async function setTheme(id, darkMode) { if (typeof darkMode !== 'boolean') fail(400, 'Invalid theme.'); return one(pool, 'UPDATE attendees SET dark_mode=$2 WHERE id=$1 RETURNING id,dark_mode', [needId(id), darkMode]); }
+export async function deactivateAttendee(id, io) {
+  const attendeeId = needId(id);
+  await tx(async db => {
+    const person = await one(db, 'SELECT id,name FROM attendees WHERE id=$1 AND active=true FOR UPDATE', [attendeeId]);
+    if (!person) fail(404, 'Attendee not found.');
+    const activeSpeaker = await one(db, 'SELECT 1 FROM team_speaker_state ts JOIN speaker_sessions ss ON ss.id=ts.speaker_session_id WHERE ss.speaker_id=$1', [attendeeId]);
+    if (activeSpeaker) fail(409, 'Finish or cancel this attendee\'s active speaker round first.');
+    await db.query('UPDATE attendees SET active=false,name_key=$2 WHERE id=$1', [attendeeId, `removed:${attendeeId}`]);
+  });
+  changed(io, 'attendee:removed');
+}
 
 export async function publicState(attendeeId, origin, includePrivate = false, screenTeamId = null) {
   await advanceExpiredScenario();
   const state = await one(pool, 'SELECT * FROM event_state WHERE id=1'), teams = await all(pool, 'SELECT * FROM teams ORDER BY id');
-  let viewer = null; if (attendeeId && uuid(attendeeId)) viewer = await one(pool, 'SELECT id,name,team_id,dark_mode FROM attendees WHERE id=$1', [attendeeId]);
+  let viewer = null; if (attendeeId && uuid(attendeeId)) viewer = await one(pool, 'SELECT id,name,team_id,dark_mode FROM attendees WHERE id=$1 AND active=true', [attendeeId]) || null;
   const teamStates = await all(pool, 'SELECT * FROM team_speaker_state ORDER BY team_id'), speakers = [];
   for (const teamState of teamStates) { const speaker = await speakerData(pool, teamState, viewer, origin, includePrivate); if (speaker) speakers.push(speaker); }
   const requestedTeam = screenTeamId == null ? null : needTeamId(screenTeamId), contextTeam = requestedTeam ?? viewer?.team_id ?? null;
@@ -70,10 +81,10 @@ export async function publicState(attendeeId, origin, includePrivate = false, sc
 
 export async function adminSnapshot(origin, connectedCount = 0) {
   const state = await publicState(null, origin, true);
-  const [attendees, scenarios, counts, played, answers, speakerPrompts] = await Promise.all([all(pool, "SELECT a.id,a.name,a.team_id,EXISTS(SELECT 1 FROM speaker_sessions s WHERE s.speaker_id=a.id AND s.status<>'CANCELLED') AS spoke,EXISTS(SELECT 1 FROM scenario_answers an JOIN scenario_rounds r ON r.id=an.round_id WHERE an.attendee_id=a.id AND r.status<>'CANCELLED') AS played FROM attendees a ORDER BY a.name"), all(pool, 'SELECT * FROM scenarios ORDER BY created_at DESC'), all(pool, 'SELECT team_id,count(*)::int AS count FROM attendees GROUP BY team_id'), one(pool, 'SELECT count(*)::int AS count FROM attendees'), state.scenario ? all(pool, 'SELECT an.id,an.attendee_id,a.name,an.answer_text,an.approved,an.display_order FROM scenario_answers an JOIN attendees a ON a.id=an.attendee_id WHERE an.round_id=$1 ORDER BY an.created_at', [state.scenario.id]) : [], all(pool, "SELECT p.id,p.prompt_text,p.created_at,coalesce(array_agg(DISTINCT ss.team_id) FILTER (WHERE ss.team_id IS NOT NULL),'{}')::smallint[] AS used_team_ids FROM speaker_prompts p LEFT JOIN speaker_sessions ss ON ss.prompt_id=p.id GROUP BY p.id ORDER BY cardinality(coalesce(array_agg(DISTINCT ss.team_id) FILTER (WHERE ss.team_id IS NOT NULL),'{}')::smallint[]),p.created_at DESC")]);
+  const [attendees, scenarios, counts, played, answers, speakerPrompts] = await Promise.all([all(pool, "SELECT a.id,a.name,a.team_id,EXISTS(SELECT 1 FROM speaker_sessions s WHERE s.speaker_id=a.id AND s.status<>'CANCELLED') AS spoke,EXISTS(SELECT 1 FROM scenario_answers an JOIN scenario_rounds r ON r.id=an.round_id WHERE an.attendee_id=a.id AND r.status<>'CANCELLED') AS played FROM attendees a WHERE a.active=true ORDER BY a.name"), all(pool, 'SELECT * FROM scenarios ORDER BY created_at DESC'), all(pool, 'SELECT team_id,count(*)::int AS count FROM attendees WHERE active=true GROUP BY team_id'), one(pool, 'SELECT count(*)::int AS count FROM attendees WHERE active=true'), state.scenario ? all(pool, 'SELECT an.id,an.attendee_id,a.name,an.answer_text,an.approved,an.display_order FROM scenario_answers an JOIN attendees a ON a.id=an.attendee_id WHERE an.round_id=$1 ORDER BY an.created_at', [state.scenario.id]) : [], all(pool, "SELECT p.id,p.prompt_text,p.created_at,coalesce(array_agg(DISTINCT ss.team_id) FILTER (WHERE ss.team_id IS NOT NULL),'{}')::smallint[] AS used_team_ids FROM speaker_prompts p LEFT JOIN speaker_sessions ss ON ss.prompt_id=p.id GROUP BY p.id ORDER BY cardinality(coalesce(array_agg(DISTINCT ss.team_id) FILTER (WHERE ss.team_id IS NOT NULL),'{}')::smallint[]),p.created_at DESC")]);
   Object.assign(state, { attendees, scenarios, teamCounts: counts, attendeeCount: played.count, connectedCount, answers, speakerPrompts, activity: state.globalActivity });
-  for (const speaker of state.speakers) { const eligible = await one(pool, 'SELECT count(*)::int AS count FROM attendees WHERE team_id=$1 AND id<>(SELECT speaker_id FROM speaker_sessions WHERE id=$2)', [speaker.teamId, speaker.id]); speaker.eligibleCount = eligible.count; }
-  if (state.scenario) { const eligible = await one(pool, 'SELECT count(*)::int AS count FROM attendees at WHERE EXISTS(SELECT 1 FROM scenario_answers an WHERE an.round_id=$1 AND an.attendee_id<>at.id)', [state.scenario.id]), votes = await one(pool, 'SELECT count(*)::int AS count FROM scenario_votes WHERE round_id=$1', [state.scenario.id]); state.scenario.eligibleCount = eligible.count; state.scenario.voteCount = votes.count; state.scenario.answerCount = answers.length; }
+  for (const speaker of state.speakers) { const eligible = await one(pool, 'SELECT count(*)::int AS count FROM attendees WHERE active=true AND team_id=$1 AND id<>(SELECT speaker_id FROM speaker_sessions WHERE id=$2)', [speaker.teamId, speaker.id]); speaker.eligibleCount = eligible.count; }
+  if (state.scenario) { const eligible = await one(pool, 'SELECT count(*)::int AS count FROM attendees at WHERE at.active=true AND EXISTS(SELECT 1 FROM scenario_answers an WHERE an.round_id=$1 AND an.attendee_id<>at.id)', [state.scenario.id]), votes = await one(pool, 'SELECT count(*)::int AS count FROM scenario_votes WHERE round_id=$1', [state.scenario.id]); state.scenario.eligibleCount = eligible.count; state.scenario.voteCount = votes.count; state.scenario.answerCount = answers.length; }
   state.defaultParticipants = (await one(pool, 'SELECT default_participants FROM event_state WHERE id=1')).default_participants; return state;
 }
 
@@ -81,7 +92,7 @@ export async function exportEventData() {
   const [event, teams, attendees, speakerPrompts, scenarios, speakerScores, scenarioPoints] = await Promise.all([
     one(pool, 'SELECT event_name,default_participants FROM event_state WHERE id=1'),
     all(pool, 'SELECT id,name,color FROM teams ORDER BY id'),
-    all(pool, 'SELECT a.name,a.team_id,t.name AS team_name FROM attendees a JOIN teams t ON t.id=a.team_id ORDER BY a.name'),
+    all(pool, 'SELECT a.name,a.team_id,t.name AS team_name FROM attendees a JOIN teams t ON t.id=a.team_id WHERE a.active=true ORDER BY a.name'),
     all(pool, 'SELECT prompt_text FROM speaker_prompts ORDER BY created_at,prompt_text'),
     all(pool, 'SELECT title,scenario_text FROM scenarios ORDER BY created_at,title'),
     all(pool, "SELECT a.name,ss.team_id,t.name AS team_name,ss.displayed_score::float AS score FROM speaker_sessions ss JOIN attendees a ON a.id=ss.speaker_id JOIN teams t ON t.id=ss.team_id WHERE ss.status='REVEALED' ORDER BY ss.team_id,ss.displayed_score DESC,ss.created_at"),
@@ -94,6 +105,18 @@ export async function exportEventData() {
     speakerPrompts: speakerPrompts.map(row => row.prompt_text),
     scenarios: scenarios.map(row => ({ title: row.title, text: row.scenario_text })),
     leaderboards: { speakerScores, scenarioPoints }
+  };
+}
+
+export async function exportContentData() {
+  const [speakerPrompts, scenarios] = await Promise.all([
+    all(pool, 'SELECT prompt_text FROM speaker_prompts ORDER BY created_at,prompt_text'),
+    all(pool, 'SELECT title,scenario_text FROM scenarios ORDER BY created_at,title')
+  ]);
+  return {
+    format: 'gdg-live-event-content', version: 1, exportedAt: new Date().toISOString(),
+    speakerPrompts: speakerPrompts.map(row => row.prompt_text),
+    scenarios: scenarios.map(row => ({ title: row.title, text: row.scenario_text }))
   };
 }
 
@@ -114,6 +137,27 @@ function importPayload(value) {
   return { event, teams, attendees: importArray(backup.attendees, 5000, 'Attendees'), prompts: importArray(backup.speakerPrompts, 1000, 'Speaker prompts'), scenarios: importArray(backup.scenarios, 1000, 'Scenarios') };
 }
 
+function contentImportPayload(value) {
+  const pack = value?.pack;
+  if (!pack || typeof pack !== 'object' || Array.isArray(pack) || pack.format !== 'gdg-live-event-content' || pack.version !== 1) fail(400, 'Choose a valid prompts and scenarios export file.');
+  return { prompts: importArray(pack.speakerPrompts, 1000, 'Speaker prompts'), scenarios: importArray(pack.scenarios, 1000, 'Scenarios') };
+}
+
+async function addContent(db, prompts, scenarios) {
+  let promptsAdded = 0, scenariosAdded = 0;
+  for (const item of prompts) {
+    const prompt = validText(item, 500, 'Prompt');
+    const inserted = await db.query('INSERT INTO speaker_prompts(prompt_text) VALUES($1) ON CONFLICT DO NOTHING', [prompt]);
+    promptsAdded += inserted.rowCount;
+  }
+  for (const item of scenarios) {
+    const title = validText(item?.title, 100, 'Scenario title'), text = validText(item?.text, 2000, 'Scenario');
+    const inserted = await db.query("INSERT INTO scenarios(title,scenario_text,status) SELECT $1,$2,'DRAFT' WHERE NOT EXISTS (SELECT 1 FROM scenarios WHERE lower(title)=lower($1) AND scenario_text=$2)", [title, text]);
+    scenariosAdded += inserted.rowCount;
+  }
+  return { promptsAdded, scenariosAdded };
+}
+
 export async function importEventData(value, io) {
   const { event, teams, attendees, prompts, scenarios } = importPayload(value);
   const result = await tx(async db => {
@@ -128,26 +172,23 @@ export async function importEventData(value, io) {
       if (!/^#[0-9a-f]{6}$/i.test(color)) fail(400, 'Invalid team color.');
       await db.query('UPDATE teams SET name=$2,color=$3 WHERE id=$1', [id, name, color]);
     }
-    let attendeesAdded = 0, promptsAdded = 0, scenariosAdded = 0;
+    let attendeesAdded = 0;
     for (const item of attendees) {
       const name = normalizeName(item?.name), teamId = needTeamId(item?.teamId);
       if (name.length < 2 || name.length > 80) fail(400, 'Each attendee name must be 2–80 characters.');
       const inserted = await db.query('INSERT INTO attendees(id,name,name_key,team_id) VALUES($1,$2,$3,$4) ON CONFLICT(name_key) DO NOTHING', [randomUUID(), name, name.toLocaleLowerCase(), teamId]);
       attendeesAdded += inserted.rowCount;
     }
-    for (const item of prompts) {
-      const prompt = validText(item, 500, 'Prompt');
-      const inserted = await db.query('INSERT INTO speaker_prompts(prompt_text) VALUES($1) ON CONFLICT DO NOTHING', [prompt]);
-      promptsAdded += inserted.rowCount;
-    }
-    for (const item of scenarios) {
-      const title = validText(item?.title, 100, 'Scenario title'), text = validText(item?.text, 2000, 'Scenario');
-      const inserted = await db.query("INSERT INTO scenarios(title,scenario_text,status) SELECT $1,$2,'DRAFT' WHERE NOT EXISTS (SELECT 1 FROM scenarios WHERE lower(title)=lower($1) AND scenario_text=$2)", [title, text]);
-      scenariosAdded += inserted.rowCount;
-    }
-    return { attendeesAdded, promptsAdded, scenariosAdded };
+    return { attendeesAdded, ...await addContent(db, prompts, scenarios) };
   });
   changed(io, 'data:imported');
+  return result;
+}
+
+export async function importContentData(value, io) {
+  const { prompts, scenarios } = contentImportPayload(value);
+  const result = await tx(db => addContent(db, prompts, scenarios));
+  changed(io, 'content:imported');
   return result;
 }
 
@@ -159,14 +200,36 @@ export async function screen(view, io) { const views = ['WELCOME', 'WAITING', 'T
 export async function addSpeakerPrompts({ prompts }, io) { if (!Array.isArray(prompts) || !prompts.length || prompts.length > 100) fail(400, 'Add between 1 and 100 prompts at a time.'); const unique = new Map(); for (const value of prompts) { const prompt = validText(value, 500, 'Prompt'); unique.set(prompt.toLocaleLowerCase(), prompt); } const added = await tx(async db => { let count = 0; for (const prompt of unique.values()) { const result = await db.query('INSERT INTO speaker_prompts(prompt_text) VALUES($1) ON CONFLICT DO NOTHING RETURNING id', [prompt]); count += result.rowCount; } return count; }); if (!added) fail(409, 'All of these prompts are already in the bank.'); changed(io, 'speaker-prompts:changed'); return { added }; }
 export async function deleteSpeakerPrompt(id, io) { const result = await pool.query('DELETE FROM speaker_prompts p WHERE p.id=$1 AND NOT EXISTS(SELECT 1 FROM speaker_sessions ss WHERE ss.prompt_id=p.id) RETURNING p.id', [needId(id)]); if (!result.rowCount) fail(409, 'A prompt cannot be deleted after it has been assigned to a team.'); changed(io, 'speaker-prompts:changed'); }
 
-export async function selectSpeaker({ teamId, attendeeId }, io) { await tx(async db => { const id = needTeamId(teamId), state = await locked(db), teamState = await teamSpeakerState(db, id, true); if (state.activity === 'SCENARIO') fail(409, 'Finish or cancel the scenario round first.'); if (teamState.speaker_session_id) fail(409, "Finish or cancel this team's current speaker round first."); const prompt = await one(db, 'SELECT p.id,p.prompt_text FROM speaker_prompts p WHERE NOT EXISTS(SELECT 1 FROM speaker_sessions ss WHERE ss.prompt_id=p.id AND ss.team_id=$1) ORDER BY random() LIMIT 1 FOR UPDATE OF p', [id]); if (!prompt) fail(409, 'This team has used every prompt. Add more prompts to the bank.'); let chosen; if (attendeeId) { chosen = await attendee(db, attendeeId); if (chosen.team_id !== id) fail(400, 'Attendee is on another team.'); } else chosen = selectRandom(await all(db, "SELECT a.* FROM attendees a WHERE a.team_id=$1 AND NOT EXISTS(SELECT 1 FROM speaker_sessions ss WHERE ss.speaker_id=a.id AND ss.status<>'CANCELLED')", [id]))[0]; const speaker = await one(db, 'INSERT INTO speaker_sessions(speaker_id,team_id,prompt_id,status) VALUES($1,$2,$3,$4) RETURNING id', [chosen.id, chosen.team_id, prompt.id, 'SELECTED']); await db.query("UPDATE team_speaker_state SET speaker_session_id=$2,screen_view='SPEAKER_SELECTION',updated_at=now() WHERE team_id=$1", [id, speaker.id]); await db.query("UPDATE event_state SET activity='SPEAKER',speaker_session_id=NULL,updated_at=now() WHERE id=1"); }); changed(io, 'speaker:selected'); }
+export async function selectSpeaker({ teamId, attendeeId, promptId }, io) {
+  await tx(async db => {
+    const id = needTeamId(teamId), state = await locked(db), teamState = await teamSpeakerState(db, id, true);
+    if (state.activity === 'SCENARIO') fail(409, 'Finish or cancel the scenario round first.');
+    if (teamState.speaker_session_id) fail(409, "Finish or cancel this team's current speaker round first.");
+    const prompt = promptId
+      ? await one(db, 'SELECT p.id,p.prompt_text FROM speaker_prompts p WHERE p.id=$2 AND NOT EXISTS(SELECT 1 FROM speaker_sessions ss WHERE ss.prompt_id=p.id AND ss.team_id=$1) FOR UPDATE OF p', [id, needId(promptId)])
+      : await one(db, 'SELECT p.id,p.prompt_text FROM speaker_prompts p WHERE NOT EXISTS(SELECT 1 FROM speaker_sessions ss WHERE ss.prompt_id=p.id AND ss.team_id=$1) ORDER BY random() LIMIT 1 FOR UPDATE OF p', [id]);
+    if (!prompt) fail(409, promptId ? 'The selected prompt is no longer available for this team.' : 'This team has used every prompt. Add more prompts to the bank.');
+    let chosen;
+    if (attendeeId) {
+      chosen = await attendee(db, attendeeId);
+      if (chosen.team_id !== id) fail(400, 'Attendee is on another team.');
+    } else {
+      chosen = selectRandom(await all(db, "SELECT a.* FROM attendees a WHERE a.active=true AND a.team_id=$1 AND NOT EXISTS(SELECT 1 FROM speaker_sessions ss WHERE ss.speaker_id=a.id AND ss.status<>'CANCELLED')", [id]))[0];
+      if (!chosen) fail(409, 'Every active attendee on this team has already spoken.');
+    }
+    const speaker = await one(db, 'INSERT INTO speaker_sessions(speaker_id,team_id,prompt_id,status) VALUES($1,$2,$3,$4) RETURNING id', [chosen.id, chosen.team_id, prompt.id, 'SELECTED']);
+    await db.query("UPDATE team_speaker_state SET speaker_session_id=$2,screen_view='SPEAKER_SELECTION',updated_at=now() WHERE team_id=$1", [id, speaker.id]);
+    await db.query("UPDATE event_state SET activity='SPEAKER',speaker_session_id=NULL,updated_at=now() WHERE id=1");
+  });
+  changed(io, 'speaker:selected');
+}
 export async function confirmSpeaker(token, id, io) { await tx(async db => { if (!uuid(token)) fail(403, 'This QR code is not assigned to you or has expired.'); const speaker = await one(db, 'SELECT * FROM speaker_sessions WHERE qr_token=$1', [token]); if (!speaker) fail(403, 'This QR code is not assigned to you or has expired.'); const teamState = await teamSpeakerState(db, speaker.team_id, true); if (teamState.speaker_session_id !== speaker.id) fail(403, 'This QR code is no longer active.'); requireStatus(speaker.status, ['SELECTED']); if (new Date(speaker.qr_expires_at) < new Date() || speaker.speaker_id !== needId(id)) fail(403, 'This QR code is not assigned to you or has expired.'); await db.query("UPDATE speaker_sessions SET status='CONFIRMED' WHERE id=$1", [speaker.id]); await db.query("UPDATE team_speaker_state SET screen_view='SPEAKER_ACTIVE',updated_at=now() WHERE team_id=$1", [speaker.team_id]); }); changed(io, 'speaker:confirmed'); }
 export async function speakerTransition(action, { teamId } = {}, io) { await tx(async db => { await locked(db); const teamState = await teamSpeakerState(db, teamId, true), speaker = await currentSpeaker(db, teamState), rules = { open: [['CONFIRMED', 'CLOSED'], 'OPEN', 'SPEAKER_VOTING'], close: [['OPEN'], 'CLOSED', 'SPEAKER_VOTING'], reveal: [['CLOSED'], 'REVEALED', 'SPEAKER_RESULT'], 'force-reveal': [['OPEN'], 'REVEALED', 'SPEAKER_RESULT'], cancel: [['SELECTED', 'CONFIRMED', 'OPEN', 'CLOSED'], 'CANCELLED', 'WAITING'] }, rule = rules[action]; if (!rule) fail(400, 'Invalid action.'); requireStatus(speaker.status, rule[0]); let result = null; if (action === 'reveal' || action === 'force-reveal') result = score((await all(db, 'SELECT rating FROM speaker_votes WHERE session_id=$1', [speaker.id])).map(item => item.rating)); await db.query('UPDATE speaker_sessions SET status=$2,displayed_score=$3 WHERE id=$1', [speaker.id, rule[1], result]); await db.query('UPDATE team_speaker_state SET screen_view=$2,speaker_session_id=$3,updated_at=now() WHERE team_id=$1', [speaker.team_id, rule[2], action === 'cancel' ? null : speaker.id]); if (action === 'cancel') { const active = (await one(db, 'SELECT count(*)::int AS count FROM team_speaker_state WHERE speaker_session_id IS NOT NULL')).count; await db.query('UPDATE event_state SET activity=$1,updated_at=now() WHERE id=1', [active ? 'SPEAKER' : 'NONE']); } }); changed(io, `speaker:${action}`); }
 export async function speakerVote({ attendeeId, rating }, io) { const value = Number(rating); if (!Number.isInteger(value) || value < 0 || value > 100) fail(400, 'Rating must be 0–100.'); await tx(async db => { const person = await attendee(db, attendeeId), teamState = await teamSpeakerState(db, person.team_id, true), speaker = await currentSpeaker(db, teamState); requireStatus(speaker.status, ['OPEN']); if (person.id === speaker.speaker_id) fail(403, 'A speaker cannot rate themselves.'); try { await db.query('INSERT INTO speaker_votes(session_id,attendee_id,rating) VALUES($1,$2,$3)', [speaker.id, person.id, value]); } catch (error) { if (error.code === '23505') fail(409, 'You already rated this speaker.'); throw error; } }); changed(io, 'speaker:vote-count-updated'); }
 
 export async function saveScenario({ id, title, text, status }, io) { if (!['DRAFT', 'READY'].includes(status)) fail(400, 'Invalid scenario status.'); const result = id ? await one(pool, "UPDATE scenarios SET title=$2,scenario_text=$3,status=$4 WHERE id=$1 AND status IN ('DRAFT','READY') RETURNING *", [needId(id), validText(title, 100, 'Title'), validText(text, 2000, 'Scenario'), status]) : await one(pool, 'INSERT INTO scenarios(title,scenario_text,status) VALUES($1,$2,$3) RETURNING *', [validText(title, 100, 'Title'), validText(text, 2000, 'Scenario'), status]); if (!result) fail(409, 'Scenario cannot be edited now.'); changed(io); return result; }
 export async function deleteScenario(id, io) { const result = await pool.query("DELETE FROM scenarios WHERE id=$1 AND status IN ('DRAFT','READY') RETURNING id", [needId(id)]); if (!result.rowCount) fail(409, 'Scenario cannot be deleted now.'); changed(io); }
-export async function startScenario({ scenarioId, durationSeconds }, io) { const duration = Number(durationSeconds); if (!Number.isInteger(duration) || duration < 10 || duration > 3600) fail(400, 'Choose an answer time between 10 seconds and 60 minutes.'); const round = await tx(async db => { const state = await locked(db), activeSpeakers = (await one(db, 'SELECT count(*)::int AS count FROM team_speaker_state WHERE speaker_session_id IS NOT NULL')).count; if (state.activity !== 'NONE' || activeSpeakers) fail(409, 'Finish or cancel all current rounds first.'); const scenario = await one(db, 'SELECT * FROM scenarios WHERE id=$1', [needId(scenarioId)]); if (!scenario || scenario.status !== 'READY') fail(409, 'Choose a ready scenario.'); const created = await one(db, "INSERT INTO scenario_rounds(scenario_id,status,duration_seconds,started_at,ends_at) VALUES($1,'COLLECTING',$2::integer,now(),now()+($2::integer*interval '1 second')) RETURNING id,ends_at", [scenario.id, duration]); await db.query('INSERT INTO scenario_round_participants(round_id,attendee_id) SELECT $1,id FROM attendees ON CONFLICT DO NOTHING', [created.id]); await db.query("UPDATE scenarios SET status='ACTIVE' WHERE id=$1", [scenario.id]); await db.query("UPDATE event_state SET activity='SCENARIO',scenario_round_id=$1,speaker_session_id=NULL,screen_view='SCENARIO_WAITING_FOR_ANSWERS',updated_at=now() WHERE id=1", [created.id]); return created; }); changed(io, 'scenario:started'); const delay = Math.max(0, new Date(round.ends_at).getTime() - Date.now()) + 50; const timer = setTimeout(async () => { try { if (await advanceExpiredScenario()) changed(io, 'scenario:voting-opened'); } catch { /* a client refresh will retry the deadline transition */ } }, delay); timer.unref?.(); }
+export async function startScenario({ scenarioId, durationSeconds }, io) { const duration = Number(durationSeconds); if (!Number.isInteger(duration) || duration < 10 || duration > 3600) fail(400, 'Choose an answer time between 10 seconds and 60 minutes.'); const round = await tx(async db => { const state = await locked(db), activeSpeakers = (await one(db, 'SELECT count(*)::int AS count FROM team_speaker_state WHERE speaker_session_id IS NOT NULL')).count; if (state.activity !== 'NONE' || activeSpeakers) fail(409, 'Finish or cancel all current rounds first.'); const scenario = await one(db, 'SELECT * FROM scenarios WHERE id=$1', [needId(scenarioId)]); if (!scenario || scenario.status !== 'READY') fail(409, 'Choose a ready scenario.'); const created = await one(db, "INSERT INTO scenario_rounds(scenario_id,status,duration_seconds,started_at,ends_at) VALUES($1,'COLLECTING',$2::integer,now(),now()+($2::integer*interval '1 second')) RETURNING id,ends_at", [scenario.id, duration]); await db.query('INSERT INTO scenario_round_participants(round_id,attendee_id) SELECT $1,id FROM attendees WHERE active=true ON CONFLICT DO NOTHING', [created.id]); await db.query("UPDATE scenarios SET status='ACTIVE' WHERE id=$1", [scenario.id]); await db.query("UPDATE event_state SET activity='SCENARIO',scenario_round_id=$1,speaker_session_id=NULL,screen_view='SCENARIO_WAITING_FOR_ANSWERS',updated_at=now() WHERE id=1", [created.id]); return created; }); changed(io, 'scenario:started'); const delay = Math.max(0, new Date(round.ends_at).getTime() - Date.now()) + 50; const timer = setTimeout(async () => { try { if (await advanceExpiredScenario()) changed(io, 'scenario:voting-opened'); } catch { /* a client refresh will retry the deadline transition */ } }, delay); timer.unref?.(); }
 export async function submitAnswer({ attendeeId, text }, io) { await advanceExpiredScenario(); await tx(async db => { const state = await locked(db), round = await currentRound(db, state); requireStatus(round.status, ['COLLECTING']); if (new Date(round.ends_at).getTime() <= Date.now()) fail(409, 'Answer time has ended.'); const person = await attendee(db, attendeeId); if (!await one(db, 'SELECT 1 FROM scenario_round_participants WHERE round_id=$1 AND attendee_id=$2', [round.id, person.id])) fail(403, 'This round started before you joined.'); const order = (await one(db, 'SELECT count(*)::int AS n FROM scenario_answers WHERE round_id=$1', [round.id])).n; try { await db.query('INSERT INTO scenario_answers(round_id,attendee_id,answer_text,display_order) VALUES($1,$2,$3,$4)', [round.id, person.id, validText(text, 2000, 'Answer'), order]); } catch (error) { if (error.code === '23505') fail(409, 'Your answer is already submitted.'); throw error; } }); changed(io, 'scenario:answer-submitted'); }
 export async function scenarioTransition(action, io) { await advanceExpiredScenario(); await tx(async db => { const state = await locked(db), round = await currentRound(db, state), rules = { open: [['COLLECTING', 'CLOSED'], 'OPEN', 'SCENARIO_VOTING'], close: [['OPEN'], 'CLOSED', 'SCENARIO_VOTING'], reveal: [['CLOSED'], 'REVEALED', 'SCENARIO_RESULTS'], 'force-reveal': [['OPEN'], 'REVEALED', 'SCENARIO_RESULTS'], cancel: [['COLLECTING', 'OPEN', 'CLOSED'], 'CANCELLED', 'WAITING'] }, rule = rules[action]; if (!rule) fail(400, 'Invalid action.'); requireStatus(round.status, rule[0]); if (action === 'open' && round.status === 'COLLECTING') await randomizeScenarioAnswers(db, round.id); await db.query('UPDATE scenario_rounds SET status=$2 WHERE id=$1', [round.id, rule[1]]); if (['reveal', 'force-reveal', 'cancel'].includes(action)) await db.query('UPDATE scenarios SET status=$2 WHERE id=$1', [round.scenario_id, action === 'cancel' ? 'READY' : 'COMPLETED']); await db.query('UPDATE event_state SET activity=$1,scenario_round_id=$2,screen_view=$3,updated_at=now() WHERE id=1', [action === 'cancel' ? 'NONE' : 'SCENARIO', action === 'cancel' ? null : round.id, rule[2]]); }); changed(io, `scenario:${action}`); }
 export async function finishActivity({ teamId } = {}, io) { await tx(async db => { const state = await locked(db); if (teamId != null) { const teamState = await teamSpeakerState(db, teamId, true), speaker = await currentSpeaker(db, teamState); requireStatus(speaker.status, ['REVEALED']); await db.query("UPDATE team_speaker_state SET speaker_session_id=NULL,screen_view='WAITING',updated_at=now() WHERE team_id=$1", [speaker.team_id]); const active = (await one(db, 'SELECT count(*)::int AS count FROM team_speaker_state WHERE speaker_session_id IS NOT NULL')).count; await db.query('UPDATE event_state SET activity=$1,updated_at=now() WHERE id=1', [active ? 'SPEAKER' : 'NONE']); return; } if (state.activity !== 'SCENARIO') fail(409, 'No completed scenario activity.'); const round = await currentRound(db, state); requireStatus(round.status, ['REVEALED']); await db.query("UPDATE event_state SET activity='NONE',scenario_round_id=NULL,screen_view='WAITING',updated_at=now() WHERE id=1"); }); changed(io); }
