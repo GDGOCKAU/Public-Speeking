@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initDb } from './db/index.js';
 import { AppError } from './services/logic.js';
-import { login,logout,requireAdmin,session } from './auth.js';
+import { assertAdminPassword,login,logout,requireAdmin,session } from './auth.js';
 import * as event from './services/event.js';
 
 if(!process.env.DATABASE_URL||!process.env.ADMIN_PASSWORD||!process.env.SESSION_SECRET){
@@ -26,7 +26,6 @@ app.get('/api/state',wrap(async(req,res)=>res.json(await event.publicState(req.q
 app.post('/api/attendees',rateLimit(12,60000),wrap(async(req,res)=>res.status(201).json(await event.register(req.body))));
 app.get('/api/attendees/:id',wrap(async(req,res)=>res.json(await event.getAttendee(req.params.id))));
 app.patch('/api/attendees/:id/theme',ok(async req=>{await event.setTheme(req.params.id,req.body.darkMode);}));
-app.post('/api/speaker/confirm',rateLimit(20,60000),ok(async req=>{await event.confirmSpeaker(req.body.token,req.body.attendeeId,io);}));
 app.post('/api/speaker/votes',rateLimit(30,60000),ok(async req=>{await event.speakerVote(req.body,io);}));
 app.post('/api/scenario/answers',rateLimit(20,60000),ok(async req=>{await event.submitAnswer(req.body,io);}));
 app.post('/api/scenario/votes',rateLimit(30,60000),ok(async req=>{await event.scenarioVote(req.body,io);}));
@@ -40,6 +39,7 @@ app.post('/api/admin/import',wrap(async(req,res)=>res.json(await event.importEve
 app.get('/api/admin/content/export',wrap(async(_req,res)=>res.json(await event.exportContentData())));
 app.post('/api/admin/content/import',wrap(async(req,res)=>res.json(await event.importContentData(req.body,io))));
 app.patch('/api/admin/settings',ok(async req=>{await event.settings(req.body,io);}));
+app.post('/api/admin/reset',rateLimit(8,15*60000),ok(async req=>{assertAdminPassword(req.body?.password);await event.resetEventData(io);}));
 app.delete('/api/admin/attendees/:id',ok(async req=>{await event.deactivateAttendee(req.params.id,io);}));
 app.patch('/api/admin/theme',ok(async req=>{await event.adminTheme(req.body.darkMode);}));
 app.patch('/api/admin/screen/theme',ok(async req=>{await event.screenTheme(req.body.darkMode,io);}));

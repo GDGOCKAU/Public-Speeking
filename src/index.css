@@ -5,7 +5,7 @@
  * this file, and keep everything else as-is.
  */
 
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Roboto:wght@300;400;500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+Arabic:wght@400;500;600;700&family=Roboto:wght@300;400;500;700&display=swap');
 
 @import "tailwindcss";
 
@@ -105,12 +105,17 @@ body {
   line-height: 1.5;
 }
 
+html[lang="ar"] body { font-family: 'Noto Sans Arabic', sans-serif; }
+html[lang="ar"] #root * { font-family: 'Noto Sans Arabic', sans-serif !important; letter-spacing: 0 !important; }
+
 #root {
   max-width: 100%;
   margin: 0;
   padding: 0;
   text-align: left;
 }
+
+html[lang="ar"] #root { text-align: right; }
 
 /* Defaults belong in the base layer so page utilities can control projector type. */
 @layer base {

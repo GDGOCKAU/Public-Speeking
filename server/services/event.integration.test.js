@@ -30,23 +30,20 @@ test('PostgreSQL registration, isolated speaker rounds and scenario integrity', 
     await event.selectSpeaker({ teamId: 2, attendeeId: cara.id }, io);
     await assert.rejects(event.deactivateAttendee(alice.id, io), /active speaker/);
     let state = await event.publicState(alice.id, 'http://localhost:5173');
-    assert.equal(state.speaker.qrUrl, undefined);
+    assert.equal(state.speaker.status, 'CONFIRMED');
+    assert.equal(state.speaker.isSpeaker, true);
     const firstPrompt = state.speaker.prompt;
     let adminState = await event.adminSnapshot('http://localhost:5173');
     assert.equal(adminState.speakers.length, 2);
     assert.equal((await event.publicState(null, 'http://localhost:5173', false, 1)).speaker.name, 'Alice One');
     assert.equal((await event.publicState(null, 'http://localhost:5173', false, 2)).speaker.name, 'Cara Three');
     assert.equal(adminState.speakers.find(speaker => speaker.teamId === 1).prompt, adminState.speakers.find(speaker => speaker.teamId === 2).prompt);
-    const teamOne = adminState.speakers.find(speaker => speaker.teamId === 1);
-    const token = new URL(teamOne.qrUrl).searchParams.get('confirm');
-    await assert.rejects(event.confirmSpeaker(token, bob.id, io), /not assigned/);
-    await event.confirmSpeaker(token, alice.id, io);
     const confirmedTeamOneScreen = await event.publicState(null, 'http://localhost:5173', false, 1);
     const untouchedTeamTwoScreen = await event.publicState(null, 'http://localhost:5173', false, 2);
     assert.equal(confirmedTeamOneScreen.screenView, 'SPEAKER_ACTIVE');
     assert.equal(confirmedTeamOneScreen.speaker.name, 'Alice One');
     assert.equal(confirmedTeamOneScreen.speaker.prompt, firstPrompt);
-    assert.equal(untouchedTeamTwoScreen.screenView, 'SPEAKER_SELECTION');
+    assert.equal(untouchedTeamTwoScreen.screenView, 'SPEAKER_ACTIVE');
     await event.speakerTransition('open', { teamId: 1 }, io);
     state = await event.publicState(bob.id, 'http://localhost:5173');
     assert.equal(state.speaker.canVote, true);
@@ -132,6 +129,24 @@ test('PostgreSQL registration, isolated speaker rounds and scenario integrity', 
     const req = { body: { password: 'wrong' } };
     await assert.rejects(login(req, { cookie() {}, json() {} }), /Incorrect password/);
     assert.equal(await session({ signedCookies: {} }), false);
+
+    await event.resetEventData(io);
+    adminState = await event.adminSnapshot('http://localhost:5173');
+    assert.equal(adminState.activity, 'NONE');
+    assert.equal(adminState.screenView, 'WELCOME');
+    assert.equal(adminState.attendees.length, 0);
+    assert.equal(adminState.speakerPrompts.length, 0);
+    assert.equal(adminState.scenarios.length, 0);
+    assert.equal(adminState.speakers.length, 0);
+    assert.equal(adminState.speakerLeaderboard.length, 0);
+    assert.equal(adminState.scenarioLeaderboard.length, 0);
+    assert.equal((await event.publicState(replacementAlice.id, 'http://localhost:5173')).viewer, null);
+    assert.deepEqual((await pool.query('SELECT screen_view,speaker_session_id FROM team_speaker_state ORDER BY team_id')).rows, [
+      { screen_view: 'WAITING', speaker_session_id: null },
+      { screen_view: 'WAITING', speaker_session_id: null }
+    ]);
+    assert.equal(Number((await pool.query('SELECT count(*) FROM attendees')).rows[0].count), 0);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM teams')).rows[0].count, 2);
     void eve;
   } finally { await pool.end(); }
 });

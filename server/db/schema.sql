@@ -6,7 +6,7 @@ ALTER TABLE attendees ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT t
 CREATE INDEX IF NOT EXISTS active_attendees_by_team ON attendees(team_id,name) WHERE active=true;
 CREATE TABLE IF NOT EXISTS speaker_prompts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), prompt_text text NOT NULL UNIQUE CHECK(length(prompt_text) BETWEEN 1 AND 500), used boolean NOT NULL DEFAULT false, used_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS unique_speaker_prompt_text ON speaker_prompts(lower(prompt_text));
-CREATE TABLE IF NOT EXISTS speaker_sessions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), speaker_id uuid NOT NULL REFERENCES attendees(id), team_id smallint NOT NULL REFERENCES teams(id), prompt_id uuid REFERENCES speaker_prompts(id), status text NOT NULL CHECK(status IN ('SELECTED','CONFIRMED','OPEN','CLOSED','REVEALED','CANCELLED')), qr_token uuid NOT NULL DEFAULT gen_random_uuid(), qr_expires_at timestamptz NOT NULL DEFAULT(now()+interval '10 minutes'), displayed_score numeric(5,2), created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS speaker_sessions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), speaker_id uuid NOT NULL REFERENCES attendees(id), team_id smallint NOT NULL REFERENCES teams(id), prompt_id uuid REFERENCES speaker_prompts(id), status text NOT NULL CHECK(status IN ('CONFIRMED','OPEN','CLOSED','REVEALED','CANCELLED')), displayed_score numeric(5,2), created_at timestamptz NOT NULL DEFAULT now());
 ALTER TABLE speaker_sessions ADD COLUMN IF NOT EXISTS prompt_id uuid REFERENCES speaker_prompts(id);
 CREATE INDEX IF NOT EXISTS speaker_by_speaker ON speaker_sessions(speaker_id);
 CREATE INDEX IF NOT EXISTS unused_speaker_prompts ON speaker_prompts(created_at) WHERE used=false;
@@ -40,6 +40,14 @@ CROSS JOIN event_state es
 LEFT JOIN speaker_sessions ss ON ss.id=es.speaker_session_id
 WHERE es.id=1
 ON CONFLICT (team_id) DO NOTHING;
+UPDATE speaker_sessions ss
+SET status='CONFIRMED'
+FROM team_speaker_state ts
+WHERE ts.speaker_session_id=ss.id AND ss.status='SELECTED';
+UPDATE team_speaker_state ts
+SET screen_view='SPEAKER_ACTIVE',updated_at=now()
+FROM speaker_sessions ss
+WHERE ts.speaker_session_id=ss.id AND ss.status='CONFIRMED' AND ts.screen_view='SPEAKER_SELECTION';
 UPDATE event_state
 SET screen_view='WAITING',updated_at=now()
 WHERE screen_view IN ('SPEAKER_SELECTION','SPEAKER_QR','SPEAKER_ACTIVE','SPEAKER_VOTING','SPEAKER_RESULT');

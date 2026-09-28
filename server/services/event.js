@@ -35,13 +35,12 @@ async function advanceExpiredScenario() {
   });
 }
 
-async function speakerData(db, state, viewer, origin, includePrivate) {
+async function speakerData(db, state, viewer) {
   if (!state.speaker_session_id) return null;
   const speaker = await currentSpeaker(db, state);
   const votes = await one(db, 'SELECT count(*)::int AS count FROM speaker_votes WHERE session_id=$1', [speaker.id]);
   const isSpeaker = viewer?.id === speaker.speaker_id;
   const data = { id: speaker.id, name: speaker.speaker_name, teamId: speaker.team_id, teamName: speaker.team_name, teamColor: speaker.team_color, prompt: speaker.prompt_text, status: speaker.status, voteCount: votes.count, score: speaker.status === 'REVEALED' ? Number(speaker.displayed_score) : null, isSpeaker, canVote: speaker.status === 'OPEN' && !!viewer && viewer.team_id === speaker.team_id && !isSpeaker };
-  if (includePrivate && speaker.status === 'SELECTED') data.qrUrl = `${origin}/?confirm=${speaker.qr_token}`;
   if (viewer) data.hasVoted = !!await one(db, 'SELECT 1 FROM speaker_votes WHERE session_id=$1 AND attendee_id=$2', [speaker.id, viewer.id]);
   return data;
 }
@@ -66,7 +65,7 @@ export async function publicState(attendeeId, origin, includePrivate = false, sc
   const state = await one(pool, 'SELECT * FROM event_state WHERE id=1'), teams = await all(pool, 'SELECT * FROM teams ORDER BY id');
   let viewer = null; if (attendeeId && uuid(attendeeId)) viewer = await one(pool, 'SELECT id,name,team_id,dark_mode FROM attendees WHERE id=$1 AND active=true', [attendeeId]) || null;
   const teamStates = await all(pool, 'SELECT * FROM team_speaker_state ORDER BY team_id'), speakers = [];
-  for (const teamState of teamStates) { const speaker = await speakerData(pool, teamState, viewer, origin, includePrivate); if (speaker) speakers.push(speaker); }
+  for (const teamState of teamStates) { const speaker = await speakerData(pool, teamState, viewer); if (speaker) speakers.push(speaker); }
   const requestedTeam = screenTeamId == null ? null : needTeamId(screenTeamId), contextTeam = requestedTeam ?? viewer?.team_id ?? null;
   const speaker = contextTeam ? speakers.find(item => item.teamId === Number(contextTeam)) || null : null, speakerScreen = contextTeam ? teamStates.find(item => item.team_id === Number(contextTeam)) : null;
   const scenarioActive = state.activity === 'SCENARIO' && !!state.scenario_round_id;
@@ -192,6 +191,24 @@ export async function importContentData(value, io) {
   return result;
 }
 
+export async function resetEventData(io) {
+  await tx(async db => {
+    await locked(db);
+    await db.query("UPDATE team_speaker_state SET speaker_session_id=NULL,screen_view='WAITING',updated_at=now()");
+    await db.query("UPDATE event_state SET activity='NONE',speaker_session_id=NULL,scenario_round_id=NULL,screen_view='WELCOME',updated_at=now() WHERE id=1");
+    await db.query('DELETE FROM speaker_votes');
+    await db.query('DELETE FROM scenario_votes');
+    await db.query('DELETE FROM scenario_answers');
+    await db.query('DELETE FROM scenario_round_participants');
+    await db.query('DELETE FROM scenario_rounds');
+    await db.query('DELETE FROM speaker_sessions');
+    await db.query('DELETE FROM speaker_prompts');
+    await db.query('DELETE FROM scenarios');
+    await db.query('DELETE FROM attendees');
+  });
+  changed(io, 'event:data-reset');
+}
+
 export async function settings(input, io) { await tx(async db => { await locked(db); const eventName = validText(input.eventName, 100, 'Event name'), count = Number(input.defaultParticipants); if (!Number.isInteger(count) || count < 2 || count > 30) fail(400, 'Participant count must be 2–30.'); await db.query('UPDATE event_state SET event_name=$1,default_participants=$2,updated_at=now() WHERE id=1', [eventName, count]); for (const team of input.teams || []) { if (![1, 2].includes(Number(team.id)) || !/^#[0-9a-f]{6}$/i.test(team.color)) fail(400, 'Invalid team.'); await db.query('UPDATE teams SET name=$2,color=$3 WHERE id=$1', [Number(team.id), validText(team.name, 40, 'Team name'), team.color]); } }); changed(io); }
 export async function adminTheme(darkMode) { if (typeof darkMode !== 'boolean') fail(400, 'Invalid theme.'); await pool.query('UPDATE event_state SET admin_dark_mode=$1 WHERE id=1', [darkMode]); }
 export async function getAdminTheme() { return (await one(pool, 'SELECT admin_dark_mode FROM event_state WHERE id=1')).admin_dark_mode; }
@@ -217,13 +234,12 @@ export async function selectSpeaker({ teamId, attendeeId, promptId }, io) {
       chosen = selectRandom(await all(db, "SELECT a.* FROM attendees a WHERE a.active=true AND a.team_id=$1 AND NOT EXISTS(SELECT 1 FROM speaker_sessions ss WHERE ss.speaker_id=a.id AND ss.status<>'CANCELLED')", [id]))[0];
       if (!chosen) fail(409, 'Every active attendee on this team has already spoken.');
     }
-    const speaker = await one(db, 'INSERT INTO speaker_sessions(speaker_id,team_id,prompt_id,status) VALUES($1,$2,$3,$4) RETURNING id', [chosen.id, chosen.team_id, prompt.id, 'SELECTED']);
-    await db.query("UPDATE team_speaker_state SET speaker_session_id=$2,screen_view='SPEAKER_SELECTION',updated_at=now() WHERE team_id=$1", [id, speaker.id]);
+    const speaker = await one(db, 'INSERT INTO speaker_sessions(speaker_id,team_id,prompt_id,status) VALUES($1,$2,$3,$4) RETURNING id', [chosen.id, chosen.team_id, prompt.id, 'CONFIRMED']);
+    await db.query("UPDATE team_speaker_state SET speaker_session_id=$2,screen_view='SPEAKER_ACTIVE',updated_at=now() WHERE team_id=$1", [id, speaker.id]);
     await db.query("UPDATE event_state SET activity='SPEAKER',speaker_session_id=NULL,updated_at=now() WHERE id=1");
   });
   changed(io, 'speaker:selected');
 }
-export async function confirmSpeaker(token, id, io) { await tx(async db => { if (!uuid(token)) fail(403, 'This QR code is not assigned to you or has expired.'); const speaker = await one(db, 'SELECT * FROM speaker_sessions WHERE qr_token=$1', [token]); if (!speaker) fail(403, 'This QR code is not assigned to you or has expired.'); const teamState = await teamSpeakerState(db, speaker.team_id, true); if (teamState.speaker_session_id !== speaker.id) fail(403, 'This QR code is no longer active.'); requireStatus(speaker.status, ['SELECTED']); if (new Date(speaker.qr_expires_at) < new Date() || speaker.speaker_id !== needId(id)) fail(403, 'This QR code is not assigned to you or has expired.'); await db.query("UPDATE speaker_sessions SET status='CONFIRMED' WHERE id=$1", [speaker.id]); await db.query("UPDATE team_speaker_state SET screen_view='SPEAKER_ACTIVE',updated_at=now() WHERE team_id=$1", [speaker.team_id]); }); changed(io, 'speaker:confirmed'); }
 export async function speakerTransition(action, { teamId } = {}, io) { await tx(async db => { await locked(db); const teamState = await teamSpeakerState(db, teamId, true), speaker = await currentSpeaker(db, teamState), rules = { open: [['CONFIRMED', 'CLOSED'], 'OPEN', 'SPEAKER_VOTING'], close: [['OPEN'], 'CLOSED', 'SPEAKER_VOTING'], reveal: [['CLOSED'], 'REVEALED', 'SPEAKER_RESULT'], 'force-reveal': [['OPEN'], 'REVEALED', 'SPEAKER_RESULT'], cancel: [['SELECTED', 'CONFIRMED', 'OPEN', 'CLOSED'], 'CANCELLED', 'WAITING'] }, rule = rules[action]; if (!rule) fail(400, 'Invalid action.'); requireStatus(speaker.status, rule[0]); let result = null; if (action === 'reveal' || action === 'force-reveal') result = score((await all(db, 'SELECT rating FROM speaker_votes WHERE session_id=$1', [speaker.id])).map(item => item.rating)); await db.query('UPDATE speaker_sessions SET status=$2,displayed_score=$3 WHERE id=$1', [speaker.id, rule[1], result]); await db.query('UPDATE team_speaker_state SET screen_view=$2,speaker_session_id=$3,updated_at=now() WHERE team_id=$1', [speaker.team_id, rule[2], action === 'cancel' ? null : speaker.id]); if (action === 'cancel') { const active = (await one(db, 'SELECT count(*)::int AS count FROM team_speaker_state WHERE speaker_session_id IS NOT NULL')).count; await db.query('UPDATE event_state SET activity=$1,updated_at=now() WHERE id=1', [active ? 'SPEAKER' : 'NONE']); } }); changed(io, `speaker:${action}`); }
 export async function speakerVote({ attendeeId, rating }, io) { const value = Number(rating); if (!Number.isInteger(value) || value < 0 || value > 100) fail(400, 'Rating must be 0–100.'); await tx(async db => { const person = await attendee(db, attendeeId), teamState = await teamSpeakerState(db, person.team_id, true), speaker = await currentSpeaker(db, teamState); requireStatus(speaker.status, ['OPEN']); if (person.id === speaker.speaker_id) fail(403, 'A speaker cannot rate themselves.'); try { await db.query('INSERT INTO speaker_votes(session_id,attendee_id,rating) VALUES($1,$2,$3)', [speaker.id, person.id, value]); } catch (error) { if (error.code === '23505') fail(409, 'You already rated this speaker.'); throw error; } }); changed(io, 'speaker:vote-count-updated'); }
 

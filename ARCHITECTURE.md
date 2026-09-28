@@ -10,7 +10,7 @@
 
 ## State machines
 
-Each team owns an independent speaker lane in `team_speaker_state`. Both lanes use `SELECTED → CONFIRMED → OPEN → CLOSED → REVEALED`, and can run concurrently without sharing a current speaker or screen view. Speaker selection and prompt assignment happen in the same transaction. Prompt usage is derived from `speaker_sessions` and is unique per `(team_id, prompt_id)`: the same prompt may be assigned once to each team, but never twice to one team, including after a cancelled round. A reopened vote returns `CLOSED → OPEN`. Speaker ratings are restricted to the attendee's own team, excluding the speaker. Scenario rounds remain exclusive and use `COLLECTING → OPEN → CLOSED → REVEALED`; they can start only when both speaker lanes are idle. The general screen state is separate from both automatic team speaker screens.
+Each team owns an independent speaker lane in `team_speaker_state`. Both lanes use `CONFIRMED → OPEN → CLOSED → REVEALED`, and can run concurrently without sharing a current speaker or screen view. Speaker selection and prompt assignment happen in the same transaction, immediately notifying the selected attendee through the existing live state connection; there is no QR confirmation step. Prompt usage is derived from `speaker_sessions` and is unique per `(team_id, prompt_id)`: the same prompt may be assigned once to each team, but never twice to one team, including after a cancelled round. A reopened vote returns `CLOSED → OPEN`. Speaker ratings are restricted to the attendee's own team, excluding the speaker. Scenario rounds remain exclusive and use `COLLECTING → OPEN → CLOSED → REVEALED`; they can start only when both speaker lanes are idle. The general screen state is separate from both automatic team speaker screens.
 
 ## Timed scenario rounds
 
@@ -28,9 +28,9 @@ Server emits `event:changed` after each committed mutation, plus `speaker:vote-c
 
 ## HTTP API
 
-Public: `GET /api/state`, `POST /api/attendees`, `GET /api/attendees/:id`, `POST /api/speaker/confirm`, `POST /api/speaker/votes`, `POST /api/scenario/answers`, `POST /api/scenario/votes`.
+Public: `GET /api/state`, `POST /api/attendees`, `GET /api/attendees/:id`, `POST /api/speaker/votes`, `POST /api/scenario/answers`, `POST /api/scenario/votes`.
 
-Admin: `POST /api/admin/login`, `POST /api/admin/logout`, `GET /api/admin/session`, `GET /api/admin/snapshot`, `PATCH /api/admin/settings`, `POST /api/admin/screen`, speaker prompt bulk-create/delete, speaker select/open/close/reopen/reveal/cancel, and scenario CRUD/start/open/close/reopen/reveal/cancel. All `/api/admin/*` actions except login and session checks require a session cookie. Admin APIs return raw vote counts; public endpoints keep scenario authors anonymous until results are revealed.
+Admin: `POST /api/admin/login`, `POST /api/admin/logout`, `GET /api/admin/session`, `GET /api/admin/snapshot`, `PATCH /api/admin/settings`, password-confirmed `POST /api/admin/reset`, `POST /api/admin/screen`, speaker prompt bulk-create/delete, speaker select/open/close/reopen/reveal/cancel, and scenario CRUD/start/open/close/reopen/reveal/cancel. All `/api/admin/*` actions except login and session checks require a session cookie. Admin APIs return raw vote counts; public endpoints keep scenario authors anonymous until results are revealed.
 
 ## Delivery phases
 
