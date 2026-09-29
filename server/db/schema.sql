@@ -10,7 +10,11 @@ CREATE TABLE IF NOT EXISTS speaker_sessions (id uuid PRIMARY KEY DEFAULT gen_ran
 ALTER TABLE speaker_sessions ADD COLUMN IF NOT EXISTS prompt_id uuid REFERENCES speaker_prompts(id);
 CREATE INDEX IF NOT EXISTS speaker_by_speaker ON speaker_sessions(speaker_id);
 CREATE INDEX IF NOT EXISTS unused_speaker_prompts ON speaker_prompts(created_at) WHERE used=false;
-CREATE UNIQUE INDEX IF NOT EXISTS one_speaker_prompt_per_team ON speaker_sessions(team_id,prompt_id) WHERE prompt_id IS NOT NULL;
+-- A cancelled speaker round returns its prompt to that team. Replace the
+-- legacy index so existing event databases get the same behaviour.
+DROP INDEX IF EXISTS one_speaker_prompt_per_team;
+CREATE UNIQUE INDEX one_speaker_prompt_per_team ON speaker_sessions(team_id,prompt_id)
+WHERE prompt_id IS NOT NULL AND status <> 'CANCELLED';
 CREATE TABLE IF NOT EXISTS speaker_votes (session_id uuid NOT NULL REFERENCES speaker_sessions(id) ON DELETE CASCADE, attendee_id uuid NOT NULL REFERENCES attendees(id), rating smallint NOT NULL CHECK(rating BETWEEN 0 AND 100), created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(session_id,attendee_id));
 CREATE TABLE IF NOT EXISTS scenarios (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), title text NOT NULL, scenario_text text NOT NULL, status text NOT NULL CHECK(status IN ('DRAFT','READY','ACTIVE','COMPLETED')), created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS scenario_rounds (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), scenario_id uuid NOT NULL REFERENCES scenarios(id), status text NOT NULL CHECK(status IN ('COLLECTING','OPEN','CLOSED','REVEALED','CANCELLED')), duration_seconds integer NOT NULL DEFAULT 60 CHECK(duration_seconds BETWEEN 10 AND 3600), started_at timestamptz NOT NULL DEFAULT now(), ends_at timestamptz NOT NULL DEFAULT(now()+interval '1 minute'), created_at timestamptz NOT NULL DEFAULT now());
