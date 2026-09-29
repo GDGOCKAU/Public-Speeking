@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { initDb } from './db/index.js';
 import { AppError } from './services/logic.js';
 import { assertAdminPassword,login,logout,requireAdmin,session } from './auth.js';
+import { attendeeRateLimitKey, rateLimit } from './rate-limit.js';
 import * as event from './services/event.js';
 
 if(!process.env.DATABASE_URL||!process.env.ADMIN_PASSWORD||!process.env.SESSION_SECRET){
@@ -16,19 +17,18 @@ if(!process.env.DATABASE_URL||!process.env.ADMIN_PASSWORD||!process.env.SESSION_
 }
 const app=express();const server=createServer(app);const origin=process.env.PUBLIC_ORIGIN||'http://localhost:5173';
 const io=new Server(server,{cors:{origin,credentials:true}});
+app.set('trust proxy',1);
 app.disable('x-powered-by');app.use(cors({origin,credentials:true}));app.use(express.json({limit:'1mb'}));app.use(cookieParser(process.env.SESSION_SECRET));
-const limits=new Map();function rateLimit(max,windowMs){return(req,res,next)=>{const key=req.ip+':'+req.path;const now=Date.now();let item=limits.get(key);if(!item||item.until<now)item={count:0,until:now+windowMs};item.count++;limits.set(key,item);if(item.count>max)return next(new AppError(429,'Too many attempts. Try again shortly.'));next();};}
-setInterval(()=>{const now=Date.now();for(const [key,item] of limits)if(item.until<now)limits.delete(key);},60000).unref();
 const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res)).catch(next);
 const ok=fn=>wrap(async(req,res)=>{await fn(req,res);res.json({ok:true});});
 app.get('/api/health',(_req,res)=>res.json({ok:true}));
 app.get('/api/state',wrap(async(req,res)=>res.json(await event.publicState(req.query.attendeeId,origin,false,req.query.screenTeamId))));
-app.post('/api/attendees',rateLimit(12,60000),wrap(async(req,res)=>res.status(201).json(await event.register(req.body))));
+app.post('/api/attendees',rateLimit(75,60000),wrap(async(req,res)=>res.status(201).json(await event.register(req.body))));
 app.get('/api/attendees/:id',wrap(async(req,res)=>res.json(await event.getAttendee(req.params.id))));
 app.patch('/api/attendees/:id/theme',ok(async req=>{await event.setTheme(req.params.id,req.body.darkMode);}));
-app.post('/api/speaker/votes',rateLimit(30,60000),ok(async req=>{await event.speakerVote(req.body,io);}));
-app.post('/api/scenario/answers',rateLimit(20,60000),ok(async req=>{await event.submitAnswer(req.body,io);}));
-app.post('/api/scenario/votes',rateLimit(30,60000),ok(async req=>{await event.scenarioVote(req.body,io);}));
+app.post('/api/speaker/votes',rateLimit(30,60000,attendeeRateLimitKey),ok(async req=>{await event.speakerVote(req.body,io);}));
+app.post('/api/scenario/answers',rateLimit(20,60000,attendeeRateLimitKey),ok(async req=>{await event.submitAnswer(req.body,io);}));
+app.post('/api/scenario/votes',rateLimit(30,60000,attendeeRateLimitKey),ok(async req=>{await event.scenarioVote(req.body,io);}));
 app.post('/api/admin/login',rateLimit(8,15*60000),wrap(login));
 app.get('/api/admin/session',wrap(async(req,res)=>res.json({authenticated:await session(req),darkMode:await event.getAdminTheme()})));
 app.use('/api/admin',requireAdmin);
