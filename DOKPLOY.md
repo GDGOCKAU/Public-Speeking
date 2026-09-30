@@ -44,6 +44,12 @@ PUBLIC_ORIGIN=https://event.example.com
 4. لا تضف أي إعداد في **Advanced > Ports**؛ الدومين يمر عبر Traefik مباشرة إلى منفذ الحاوية.
 5. اضغط **Deploy** وانتظر نجاح مرحلتي البناء والتشغيل.
 
+### إعدادات السعة للفعالية
+
+- شغّل **Replica واحدة فقط** من التطبيق. حالة Socket.IO محفوظة داخل العملية؛ تشغيل أكثر من نسخة يتطلب Redis adapter وsticky sessions.
+- [الحد الأدنى الرسمي لخادم Dokploy](https://docs.dokploy.com/docs/core/installation) هو 2GB RAM و30GB مساحة. عند تشغيل Dokploy والتطبيق وPostgreSQL على الخادم نفسه، استخدم 4GB RAM و2 vCPU لراحة أكبر أثناء الفعالية.
+- اتصال PostgreSQL مضبوط على 20 اتصالًا، وهو مناسب لفعالية تضم 40–60 حاضرًا.
+
 ## 4. التحقق
 
 - افتح `https://event.example.com/api/health` ويجب أن ترى `{"ok":true}`.

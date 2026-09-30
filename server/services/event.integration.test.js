@@ -67,15 +67,25 @@ test('PostgreSQL registration, isolated speaker rounds and scenario integrity', 
     assert.notEqual(state.speaker.prompt, firstPrompt);
     const secondPrompt = (await event.adminSnapshot('http://localhost:5173')).speakerPrompts.find(prompt => prompt.prompt_text !== firstPrompt);
     await event.speakerTransition('cancel', { teamId: 1 }, io);
+    await event.selectSpeaker({ teamId: 1, attendeeId: bob.id, promptId: secondPrompt.id }, io);
+    state = await event.publicState(bob.id, 'http://localhost:5173');
+    assert.equal(state.speaker.name, 'Bob Two');
+    assert.equal(state.speaker.prompt, secondPrompt.prompt_text);
+    await event.speakerTransition('cancel', { teamId: 1 }, io);
     await event.selectSpeaker({ teamId: 2, attendeeId: dan.id, promptId: secondPrompt.id }, io);
     state = await event.publicState(dan.id, 'http://localhost:5173');
     assert.equal(state.speaker.name, 'Dan Four');
     assert.equal(state.speaker.prompt, secondPrompt.prompt_text);
     await event.speakerTransition('cancel', { teamId: 2 }, io);
     adminState = await event.adminSnapshot('http://localhost:5173');
-    assert.equal(adminState.speakerPrompts.reduce((total, prompt) => total + prompt.used_team_ids.length, 0), 4);
-    assert.ok(adminState.speakerPrompts.every(prompt => prompt.used_team_ids.includes(1)));
-    await assert.rejects(event.selectSpeaker({ teamId: 1 }, io), /used every prompt/);
+    assert.equal(adminState.speakerPrompts.reduce((total, prompt) => total + prompt.used_team_ids.length, 0), 1);
+    assert.equal(adminState.speakerPrompts.find(prompt => prompt.prompt_text === firstPrompt).used_team_ids.includes(1), true);
+    assert.equal(adminState.speakerPrompts.find(prompt => prompt.prompt_text === secondPrompt.prompt_text).used_team_ids.length, 0);
+    await event.selectSpeaker({ teamId: 1 }, io);
+    state = await event.publicState(bob.id, 'http://localhost:5173');
+    assert.equal(state.speaker.name, 'Bob Two');
+    assert.equal(state.speaker.prompt, secondPrompt.prompt_text);
+    await event.speakerTransition('cancel', { teamId: 1 }, io);
 
     const scenario = await event.saveScenario({ title: 'The Challenge', text: 'What would you do?', status: 'READY' }, io);
     await event.startScenario({ scenarioId: scenario.id, durationSeconds: 60 }, io);
